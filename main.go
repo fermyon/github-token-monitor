@@ -24,7 +24,11 @@ import (
 	sdkTrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-const expirationLayout = "2006-01-02 15:04:05 MST"
+const (
+	// Sometimes Github returns an abbreviated timezone name, sometimes a numeric offset 🙄
+	abbrevLayout = "2006-01-02 15:04:05 MST"
+	offsetLayout = "2006-01-02 15:04:05 -0700"
+)
 
 var flags struct {
 	TokenEnvVars string `name:"token-env-vars" help:"Comma-separated list of token env var(s)"`
@@ -154,33 +158,31 @@ func checkToken(ctx context.Context, name, token string) (happy bool, err error)
 		}
 		span.End()
 	}()
+
 	fmt.Printf("Checking %q...\n", name)
 
+	// Make request to e.g. 'https://api.github.com/user' with token
 	userURL := flags.BaseURL.JoinPath("user").String()
-
 	req, err := http.NewRequestWithContext(ctx, "GET", userURL, nil)
 	if err != nil {
 		return false, fmt.Errorf("new request: %w", err)
 	}
-
 	req.Header.Set("Authorization", "Bearer "+token)
-
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("do request: %w", err)
 	}
 	defer resp.Body.Close()
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return false, fmt.Errorf("reading body: %w", err)
 	}
-
 	if resp.StatusCode != 200 {
 		span.SetAttributes(attribute.String("ghtokmon.error_body", strconv.QuoteToASCII(string(body[:1024]))))
 		return false, fmt.Errorf("got status code %d != 200", resp.StatusCode)
 	}
 
+	// Parse user login
 	var user struct {
 		Login string `json:"login"`
 	}
@@ -193,20 +195,26 @@ func checkToken(ctx context.Context, name, token string) (happy bool, err error)
 
 	happy = true
 
+	// Check token expiration
 	expirationValue := resp.Header.Get("github-authentication-token-expiration")
 	if expirationValue == "" {
 		fmt.Println("Token expiration: NONE")
 	} else {
 		span.SetAttributes(attribute.String("ghtokmon.token.expiration", expirationValue))
-		expiration, err := time.Parse(expirationLayout, expirationValue)
+
+		// Parse expiration timestamp
+		expiration, err := time.Parse(abbrevLayout, expirationValue)
+		if err != nil {
+			expiration, err = time.Parse(offsetLayout, expirationValue)
+		}
 		if err != nil {
 			return false, fmt.Errorf("invalid expiration header value %q: %w", expirationValue, err)
 		}
 		fmt.Printf("Token expiration: %s", expiration)
 
+		// Calculate time until expiration
 		expirationDuration := time.Until(expiration)
 		span.SetAttributes(attribute.Float64("ghtokmon.token.expiration_duration", expirationDuration.Seconds()))
-
 		fmt.Printf(" (%.1f days)\n", expirationDuration.Hours()/24)
 		if expirationDuration < flags.ExpirationThreshold {
 			fmt.Println("WARNING: Expiring soon!")
@@ -216,6 +224,7 @@ func checkToken(ctx context.Context, name, token string) (happy bool, err error)
 
 	}
 
+	// Check rate limit usage
 	rateLimitLimit, _ := strconv.Atoi(resp.Header.Get("x-ratelimit-limit"))
 	if rateLimitLimit != 0 {
 		rateLimitUsed, _ := strconv.Atoi(resp.Header.Get("x-ratelimit-used"))
@@ -230,6 +239,7 @@ func checkToken(ctx context.Context, name, token string) (happy bool, err error)
 		}
 	}
 
+	// Get token permissions (sometimes helpful when rotating)
 	oAuthScopes := resp.Header.Get("x-oauth-scopes")
 	span.SetAttributes(attribute.String("ghtokmon.token.oauth_scopes", oAuthScopes))
 	fmt.Printf("OAuth scopes: %s\n\n", oAuthScopes)
