@@ -31,8 +31,8 @@ const (
 )
 
 var flags struct {
-	TokenEnvVars string `name:"token-env-vars" help:"Comma-separated list of token env var(s)"`
-	TokensDir    string `name:"tokens-dir" help:"Directory containing mounted secret tokens"`
+	TokenEnvVars []string `name:"token-env-vars" help:"Comma-separated list of token env var(s)"`
+	TokensDir    string   `name:"tokens-dir" help:"Directory containing mounted secret tokens"`
 
 	BaseURL             *url.URL      `name:"base-url" default:"https://api.github.com" help:"GitHub API base URL"`
 	ExpirationThreshold time.Duration `name:"expiration-threshold" default:"360h" help:"Minimum duration until token expiration"`
@@ -87,7 +87,7 @@ func checkTokens(ctx context.Context) (err error) {
 
 	tokens := map[string]string{}
 
-	for _, envVar := range strings.Split(flags.TokenEnvVars, ",") {
+	for _, envVar := range flags.TokenEnvVars {
 		if envVar != "" {
 			token := os.Getenv(envVar)
 			if token == "" {
@@ -178,7 +178,10 @@ func checkToken(ctx context.Context, name, token string) (happy bool, err error)
 		return false, fmt.Errorf("reading body: %w", err)
 	}
 	if resp.StatusCode != 200 {
-		span.SetAttributes(attribute.String("ghtokmon.error_body", strconv.QuoteToASCII(string(body[:1024]))))
+		if len(body) > 1024 {
+			body = body[:1024]
+		}
+		span.SetAttributes(attribute.String("ghtokmon.error_body", strconv.QuoteToASCII(string(body))))
 		return false, fmt.Errorf("got status code %d != 200", resp.StatusCode)
 	}
 
