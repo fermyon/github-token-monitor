@@ -18,10 +18,10 @@ import (
 
 	"github.com/alecthomas/kong"
 	"go.opentelemetry.io/contrib/exporters/autoexport"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdkTrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
 )
 
 const expirationLayout = "2006-01-02 15:04:05 MST"
@@ -34,12 +34,14 @@ var flags struct {
 	ExpirationThreshold time.Duration `name:"expiration-threshold" default:"360h" help:"Minimum duration until token expiration"`
 }
 
-var tracer trace.Tracer
-
 func main() {
-	if err := run(); err != nil {
-		fmt.Printf("Error: %v", err)
+	err := run()
+	if _, isFailedChecks := err.(failedChecksError); isFailedChecks {
 		os.Exit(1)
+	}
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(2)
 	}
 }
 
@@ -54,21 +56,26 @@ func run() error {
 		return fmt.Errorf("starting opentelemetry: %w", err)
 	}
 
-	tracerProvider := sdkTrace.NewTracerProvider(sdkTrace.WithBatcher(exporter))
-	defer func() {
-		if err := tracerProvider.Shutdown(ctx); err != nil {
-			fmt.Printf("Error stopping opentelemetry: %v", err)
-		}
-	}()
-	tracer = tracerProvider.Tracer("")
+	// Enable tracing iff there are _any_ OTEL_* env vars set
+	enableTracing := slices.ContainsFunc(os.Environ(), func(env string) bool { return strings.HasPrefix(env, "OTEL_") })
+	if enableTracing {
+		tracerProvider := sdkTrace.NewTracerProvider(sdkTrace.WithBatcher(exporter))
+		defer func() {
+			if err := tracerProvider.Shutdown(ctx); err != nil {
+				fmt.Printf("Error stopping opentelemetry: %v", err)
+			}
+		}()
+		otel.SetTracerProvider(tracerProvider)
+	}
 
 	return checkTokens(ctx)
 }
 
 func checkTokens(ctx context.Context) (err error) {
-	ctx, span := tracer.Start(ctx, "checkTokens")
+	ctx, span := otel.Tracer("").Start(ctx, "checkTokens")
 	defer func() {
-		if err != nil {
+		_, isFailedChecks := err.(failedChecksError)
+		if err != nil && !isFailedChecks {
 			span.SetStatus(codes.Error, err.Error())
 		}
 		span.End()
@@ -126,7 +133,7 @@ func checkTokens(ctx context.Context) (err error) {
 		return fmt.Errorf("no tokens to check")
 	}
 
-	unhappyTokens := []string{}
+	unhappyTokens := failedChecksError{}
 	for name, token := range tokens {
 		happy, err := checkToken(ctx, name, token)
 		if err != nil {
@@ -137,20 +144,20 @@ func checkTokens(ctx context.Context) (err error) {
 		}
 	}
 	if len(unhappyTokens) > 0 {
-		return fmt.Errorf("checks failed for token(s): %s", strings.Join(unhappyTokens, ", "))
+		return unhappyTokens
 	}
 	return nil
 }
 
 func checkToken(ctx context.Context, name, token string) (happy bool, err error) {
-	ctx, span := tracer.Start(ctx, name)
+	ctx, span := otel.Tracer("").Start(ctx, name)
 	defer func() {
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 		}
 		span.End()
 	}()
-	fmt.Printf("\nChecking %q...\n", name)
+	fmt.Printf("Checking %q...\n", name)
 
 	userURL := flags.BaseURL.JoinPath("user").String()
 
@@ -228,6 +235,12 @@ func checkToken(ctx context.Context, name, token string) (happy bool, err error)
 
 	oAuthScopes := resp.Header.Get("x-oauth-scopes")
 	span.SetAttributes(attribute.String("ghtokmon.token.oauth_scopes", oAuthScopes))
-	fmt.Printf("OAuth scopes: %s\n", oAuthScopes)
+	fmt.Printf("OAuth scopes: %s\n\n", oAuthScopes)
 	return happy, nil
+}
+
+type failedChecksError []string
+
+func (ut failedChecksError) Error() string {
+	return fmt.Sprintf("checks failed for token(s): %s", strings.Join(ut, ", "))
 }
