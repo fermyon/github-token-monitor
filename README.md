@@ -8,7 +8,7 @@ Token expiration: NONE
 Rate limit usage: 6 / 5000 (~0%)
 OAuth scopes: gist, read:org, repo, workflow
 
-$ TOKEN="<some expired token>"
+$ TOKEN="<some expired token>" github-token-monitor --token-env-vars TOKEN
 Checking "TOKEN"...
 Token user login: your-github-username
 Token expiration: 2025-07-09 21:27:10 +0000 UTC (9.1 days)
