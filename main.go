@@ -36,12 +36,9 @@ var flags struct {
 
 func main() {
 	err := run()
-	if _, isFailedChecks := err.(failedChecksError); isFailedChecks {
-		os.Exit(1)
-	}
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
-		os.Exit(2)
+		os.Exit(1)
 	}
 }
 
