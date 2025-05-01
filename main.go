@@ -152,13 +152,14 @@ func checkTokens(ctx context.Context) (err error) {
 }
 
 func checkToken(ctx context.Context, name, token string) (happy bool, err error) {
-	ctx, span := otel.Tracer("").Start(ctx, name)
+	ctx, span := otel.Tracer("").Start(ctx, "check "+name)
 	defer func() {
 		if err != nil {
 			span.SetStatus(codes.Error, err.Error())
 		}
 		span.End()
 	}()
+	span.SetAttributes(attribute.String("ghtokmon.token.name", name))
 
 	fmt.Printf("Checking %q...\n", name)
 
