@@ -22,7 +22,8 @@ jobs:
       - name: Check Test Token not expired
         env:
           TEST_TOKEN: ${{ secrets.TEST_TOKEN }}
-        run: ./github-token-monitor --token-env-vars TEST_TOKEN --expiration-threshold=0
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./github-token-monitor --token-env-vars TEST_TOKEN,GITHUB_TOKEN --expiration-threshold=0
 
       - name: Check Test Token expiring in next year
         env:

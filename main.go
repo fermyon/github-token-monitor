@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdkTrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -161,40 +162,27 @@ func checkToken(ctx context.Context, name, token string) (happy bool, err error)
 
 	fmt.Printf("Checking %q...\n", name)
 
-	// Make request to e.g. 'https://api.github.com/user' with token
-	userURL := flags.BaseURL.JoinPath("user").String()
-	req, err := http.NewRequestWithContext(ctx, "GET", userURL, nil)
+	// Make request to check token
+	resp, _, err := request(ctx, flags.BaseURL.String(), token)
 	if err != nil {
-		return false, fmt.Errorf("new request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("do request: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return false, fmt.Errorf("reading body: %w", err)
-	}
-	if resp.StatusCode != 200 {
-		if len(body) > 1024 {
-			body = body[:1024]
-		}
-		span.SetAttributes(attribute.String("ghtokmon.error_body", strconv.QuoteToASCII(string(body))))
-		return false, fmt.Errorf("got status code %d != 200", resp.StatusCode)
+		return false, fmt.Errorf("checking token: %w", err)
 	}
 
-	// Parse user login
-	var user struct {
-		Login string `json:"login"`
+	// Get user info (if permitted)
+	userURL := flags.BaseURL.JoinPath("user").String()
+	_, userJSON, err := request(ctx, userURL, token)
+	if err == nil {
+		// Parse user login
+		var user struct {
+			Login string `json:"login"`
+		}
+		err = json.Unmarshal(userJSON, &user)
+		if err != nil {
+			return false, fmt.Errorf("deserializing user: %w", err)
+		}
+		span.SetAttributes(attribute.String("ghtokmon.token.login", user.Login))
+		fmt.Printf("Token user login: %s\n", user.Login)
 	}
-	err = json.Unmarshal(body, &user)
-	if err != nil {
-		return false, fmt.Errorf("deserializing user: %w", err)
-	}
-	span.SetAttributes(attribute.String("ghtokmon.token.login", user.Login))
-	fmt.Printf("Token user login: %s\n", user.Login)
 
 	happy = true
 
@@ -247,6 +235,43 @@ func checkToken(ctx context.Context, name, token string) (happy bool, err error)
 	span.SetAttributes(attribute.String("ghtokmon.token.oauth_scopes", oAuthScopes))
 	fmt.Printf("OAuth scopes: %s\n\n", oAuthScopes)
 	return happy, nil
+}
+
+func request(ctx context.Context, url, token string) (resp *http.Response, body []byte, err error) {
+	ctx, span := otel.Tracer("").Start(ctx, url)
+	defer func() {
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+		}
+		span.End()
+	}()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("new request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading body: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		if len(body) > 1024 {
+			body = body[:1024]
+		}
+		trace.SpanFromContext(ctx).SetAttributes(attribute.String("ghtokmon.error_body", strconv.QuoteToASCII(string(body))))
+		return nil, nil, fmt.Errorf("got status code %d != 200", resp.StatusCode)
+	}
+	return
 }
 
 type failedChecksError []string
